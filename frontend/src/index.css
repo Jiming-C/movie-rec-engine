@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+body {
+  font-family: Tahoma, "MS Sans Serif", Arial, sans-serif;
+  font-size: 11px;
+  background: #ece9d8;
+  margin: 0;
+}
