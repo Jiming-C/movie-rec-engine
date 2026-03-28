@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 import pickle
 
 import numpy as np
@@ -8,6 +10,34 @@ from sklearn.decomposition import PCA
 from app.core.config import MODELS_DIR
 from app.models.mf_model import MatrixFactorization
 from app.services.data_loader import load_movies
+
+logger = logging.getLogger(__name__)
+
+_ARTIFACT_KEYS = [
+    ("models/mf_model.pt", MODELS_DIR / "mf_model.pt"),
+    ("models/id_mappings.pkl", MODELS_DIR / "id_mappings.pkl"),
+]
+
+
+def download_artifacts_if_needed() -> None:
+    """Download model artifacts from S3 if they don't exist locally."""
+    missing = [(key, path) for key, path in _ARTIFACT_KEYS if not path.exists()]
+    if not missing:
+        return
+
+    import boto3
+
+    bucket = os.environ.get("S3_BUCKET", "movie-rec-engine-artifacts")
+    region = os.environ.get("AWS_REGION", "us-east-2")
+    s3 = boto3.client("s3", region_name=region)
+
+    for key, path in missing:
+        logger.info("Downloading s3://%s/%s -> %s", bucket, key, path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        s3.download_file(bucket, key, str(path))
+
+
+download_artifacts_if_needed()
 
 # Load ID mappings
 with open(MODELS_DIR / "id_mappings.pkl", "rb") as f:
