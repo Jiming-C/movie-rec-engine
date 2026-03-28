@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 
-const API = 'http://localhost:8000'
+const API = import.meta.env.VITE_API_URL || ''
 
 const NARRATION = [
   "The model starts out knowing nothing. It makes random guesses, so the error is very high.",
@@ -140,7 +140,7 @@ export default function TrainingChart() {
 
       {/* Chart */}
       <div style={{ background: '#fff', border: '2px inset #d4d0c8', padding: 4 }}>
-        <svg width={W} height={H} style={{ display: 'block' }}
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }}
           onMouseMove={(e) => {
             const rect = e.currentTarget.getBoundingClientRect()
             const x = e.clientX - rect.left - PAD.left

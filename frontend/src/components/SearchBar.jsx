@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 
-const API = 'http://localhost:8000'
+const API = import.meta.env.VITE_API_URL || ''
 
 export default function SearchBar({ onRecommendations, onLoading, onError, onUserId }) {
   const [movies, setMovies] = useState([])

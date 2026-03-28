@@ -4,6 +4,8 @@ A full-stack movie recommendation system that uses **matrix factorization** to l
 
 Built with PyTorch, FastAPI, React, and the MovieLens dataset.
 
+**Live demo:** [movie-rec-engine.vercel.app](https://movie-rec-engine.vercel.app)
+
 ---
 
 ## How It Works
@@ -69,13 +71,14 @@ The model sees 80% of ratings during training and 20% is held back for testing. 
 
 | Technology | Role |
 |---|---|
-| **Python 3.14** | Runtime |
-| **PyTorch** | Deep learning framework — defines the model, runs training, handles GPU/CPU tensors |
+| **Python 3.11** | Runtime (Docker container) |
+| **PyTorch 2.11** | Deep learning framework — defines the model, runs training, handles tensors |
 | **FastAPI** | Async web framework — serves the REST API with automatic OpenAPI docs |
 | **Uvicorn** | ASGI server that runs FastAPI |
 | **pandas** | Loads and manipulates the CSV rating/movie data |
 | **NumPy** | Numerical operations, array handling |
 | **scikit-learn** | PCA for dimensionality reduction in the embedding visualization |
+| **boto3** | AWS SDK — downloads model artifacts from S3 on first deploy |
 | **python-dotenv** | Environment variable management |
 
 ### Frontend
@@ -83,13 +86,132 @@ The model sees 80% of ratings during training and 20% is held back for testing. 
 | Technology | Role |
 |---|---|
 | **React 19** | UI framework — component-based, reactive state management |
-| **Vite** | Build tool — instant hot reload, fast bundling |
+| **Vite 8** | Build tool — instant hot reload, fast bundling |
 | **Tailwind CSS v4** | Utility-first CSS (used for base styles) |
-| **SVG** | All charts and visualizations are hand-drawn SVG — no charting libraries |
+| **Custom SVG** | All charts and visualizations are hand-drawn SVG — no charting libraries |
+
+### Infrastructure
+
+| Technology | Role |
+|---|---|
+| **AWS EC2** | Hosts the backend API (Docker container on Ubuntu) |
+| **AWS S3** | Stores model artifacts (weights + mappings) for deployment |
+| **Docker** | Containerizes the backend for consistent deployment |
+| **Vercel** | Hosts the frontend with API rewrites to proxy backend requests |
 
 ### Dataset
 
 **MovieLens Latest Small** — 100,836 ratings from 610 users across 9,742 movies. Collected by GroupLens Research at the University of Minnesota.
+
+---
+
+## Architecture
+
+```
+                         ┌──────────────────────────┐
+                         │       Vercel (CDN)        │
+                         │   Frontend (React/Vite)   │
+                         │                           │
+                         │  movie-rec-engine.vercel  │
+                         └────────────┬─────────────┘
+                                      │
+                           /api/* rewrite (HTTPS→HTTP)
+                                      │
+                         ┌────────────▼─────────────┐
+                         │      AWS EC2 (Ubuntu)     │
+                         │   Docker: FastAPI + Uvi   │
+                         │       port 8000           │
+                         │                           │
+                         │  ┌─────────────────────┐  │
+                         │  │  PyTorch MF Model    │  │
+                         │  │  64-dim embeddings   │  │
+                         │  └─────────────────────┘  │
+                         │                           │
+                         │  Volumes:                 │
+                         │   /app/data      (dataset)│
+                         │   /app/artifacts (model)  │
+                         └────────────┬─────────────┘
+                                      │
+                              on first boot
+                                      │
+                         ┌────────────▼─────────────┐
+                         │        AWS S3             │
+                         │  movie-rec-engine-        │
+                         │  artifacts bucket         │
+                         │                           │
+                         │  models/mf_model.pt       │
+                         │  models/id_mappings.pkl   │
+                         └──────────────────────────┘
+```
+
+The frontend is served by Vercel's CDN. All API calls go to `/api/*` which Vercel rewrites to the EC2 backend over HTTP. This avoids mixed-content issues (HTTPS frontend calling HTTP backend) without needing to set up TLS on EC2. On first boot, the backend downloads model artifacts from S3 if they don't exist locally.
+
+---
+
+## ML Data Pipeline
+
+### Dataset: MovieLens Latest Small
+
+The [MovieLens](https://grouplens.org/datasets/movielens/) dataset contains real user ratings collected by GroupLens Research. We use the "latest small" version:
+
+- **100,836 ratings** on a 0.5–5.0 star scale
+- **610 users**, **9,742 movies**
+- Each rating has a userId, movieId, rating, and timestamp
+- Movies have titles and pipe-separated genre tags
+
+### Training Pipeline
+
+```
+ratings.csv ──► pandas DataFrame
+                    │
+                    ▼
+            Create ID mappings
+         (user_to_idx, item_to_idx)
+                    │
+                    ▼
+          80/20 train/test split
+             (seed=42)
+                    │
+                    ▼
+        PyTorch DataLoaders
+          (batch_size=256)
+                    │
+                    ▼
+    ┌─── 20 epochs ──────────────┐
+    │  Forward: dot product      │
+    │  Loss: MSE                 │
+    │  Backward: gradients       │
+    │  Update: Adam (lr=0.01)    │
+    │  Evaluate: test RMSE       │
+    └────────────────────────────┘
+                    │
+                    ▼
+          Save artifacts:
+           mf_model.pt
+           id_mappings.pkl
+           training_history.json
+```
+
+### Model Architecture
+
+The `MatrixFactorization` model is a PyTorch `nn.Module` with two embedding layers:
+
+- **User embedding**: `nn.Embedding(610, 64)` — each user gets a 64-dimensional vector
+- **Item embedding**: `nn.Embedding(9742, 64)` — each movie gets a 64-dimensional vector
+- **Scoring**: element-wise multiply user and item vectors, sum across all 64 dimensions (dot product)
+- **Initialization**: Kaiming normal for stable training
+
+No bias terms or regularization — this is an intentionally simple baseline to make the math easy to visualize and explain.
+
+### Inference
+
+At serving time, to recommend movies for a user:
+
+1. Look up the user's 64-dim embedding
+2. Compute the dot product with every movie's embedding
+3. Return the top-N highest-scoring movies
+
+The `/explain` endpoint breaks this down step by step, showing the actual embedding values, element-wise products, and running sum.
 
 ---
 
@@ -98,33 +220,37 @@ The model sees 80% of ratings during training and 20% is held back for testing. 
 ```
 movie-rec-engine/
 ├── backend/
+│   ├── Dockerfile                 # python:3.11-slim, uvicorn entrypoint
+│   ├── .dockerignore
+│   ├── requirements.txt           # PyTorch, FastAPI, boto3, etc.
 │   ├── app/
-│   │   ├── api/routes.py          # REST endpoints
+│   │   ├── main.py                # FastAPI app + CORS middleware
+│   │   ├── api/routes.py          # 7 REST endpoints
 │   │   ├── core/config.py         # Path constants
 │   │   ├── models/mf_model.py     # PyTorch MatrixFactorization model
-│   │   ├── schemas/               # Pydantic response models
-│   │   │   └── recommendation.py
-│   │   ├── services/
-│   │   │   ├── data_loader.py     # Load CSVs with pandas
-│   │   │   ├── recommender.py     # Inference, explain, embeddings
-│   │   │   └── trainer.py         # Training loop
-│   │   └── main.py                # FastAPI app + CORS
-│   ├── artifacts/models/          # Saved model weights + mappings
-│   ├── data/raw/ml-latest-small/  # MovieLens dataset
-│   ├── requirements.txt
-│   └── venv/
+│   │   ├── schemas/
+│   │   │   └── recommendation.py  # Pydantic response models
+│   │   └── services/
+│   │       ├── data_loader.py     # Load CSVs with pandas
+│   │       ├── recommender.py     # Inference, explain, embedding map, S3 download
+│   │       └── trainer.py         # Training loop (run offline)
+│   ├── artifacts/models/          # Model weights + ID mappings
+│   └── data/raw/ml-latest-small/  # MovieLens dataset
 ├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── SearchBar.jsx          # Movie search dropdown
-│   │   │   ├── MovieCard.jsx          # Single recommendation card
-│   │   │   ├── RecommendationList.jsx # Results table
-│   │   │   ├── TrainingChart.jsx      # Animated training curves
-│   │   │   ├── ExplainView.jsx        # Step-by-step explainer
-│   │   │   └── EmbeddingMap.jsx       # PCA scatter plot
-│   │   ├── App.jsx                    # Main app with tabs
-│   │   └── index.css
-│   └── package.json
+│   ├── vercel.json                # API rewrite rules for production
+│   ├── vite.config.js
+│   ├── package.json
+│   └── src/
+│       ├── App.jsx                # Main app with tab navigation
+│       ├── index.css
+│       └── components/
+│           ├── SearchBar.jsx          # Movie search with autocomplete
+│           ├── MovieCard.jsx          # Single recommendation row with stars
+│           ├── RecommendationList.jsx # Results table
+│           ├── TrainingChart.jsx      # Animated training loss/RMSE curves
+│           ├── ExplainView.jsx        # 5-step embedding math walkthrough
+│           └── EmbeddingMap.jsx       # PCA 2D scatter plot of embeddings
+├── docker-compose.yml             # Backend service with volume mounts
 └── README.md
 ```
 
@@ -134,13 +260,13 @@ movie-rec-engine/
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/health` | Health check |
-| GET | `/movies` | All movies (id + title) for search dropdown |
+| GET | `/health` | Health check — returns `{"status": "ok"}` |
+| GET | `/movies` | All 9,742 movies (id + title) for search dropdown |
 | GET | `/movies/{movie_id}/users` | Users who rated a specific movie |
-| GET | `/recommend/{user_id}?top_n=10` | Top-N recommendations with scores |
-| GET | `/training/history` | Epoch-by-epoch loss and RMSE |
-| GET | `/explain/{user_id}?top_n=5` | Embedding breakdown for explainability |
-| GET | `/embeddings/map` | PCA 2D projection of user + item embeddings |
+| GET | `/recommend/{user_id}?top_n=10` | Top-N recommendations with predicted scores |
+| GET | `/training/history` | Epoch-by-epoch train loss and test RMSE |
+| GET | `/explain/{user_id}?top_n=5` | Embedding vectors, element-wise products, dot products |
+| GET | `/embeddings/map` | PCA 2D projection of 50 users + 200 movies |
 
 ---
 
@@ -154,7 +280,7 @@ An animated walkthrough of exactly how one recommendation is computed:
 
 1. **User embedding** — see the 64-dimensional taste vector with intuitive guesses ("maybe likes action?")
 2. **Movie embedding** — the movie's characteristic vector in a different color
-3. **Element-wise multiplication** — rows light up one by one showing user × movie for each dimension, with commentary on whether it's a match or mismatch
+3. **Element-wise multiplication** — rows light up one by one showing user x movie for each dimension, with commentary on whether it's a match or mismatch
 4. **Running sum** — product boxes highlight sequentially as a big counter accumulates the dot product
 5. **Final ranking** — the top 5 movies sorted by score with bar charts
 
@@ -163,7 +289,59 @@ A PCA projection that squishes the 64-dimensional embedding space down to 2D. Pr
 
 ---
 
-## Getting Started
+## Deployment
+
+### Backend (AWS EC2 + Docker)
+
+The backend runs as a Docker container on an EC2 instance (Ubuntu). Docker Compose manages the service with volume mounts so model weights and dataset persist across container restarts.
+
+```yaml
+# docker-compose.yml
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/artifacts:/app/artifacts
+```
+
+On first boot, if model artifacts aren't present locally, the backend automatically downloads them from an S3 bucket (`movie-rec-engine-artifacts`). This is configured via environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `S3_BUCKET` | `movie-rec-engine-artifacts` | S3 bucket with model files |
+| `AWS_REGION` | `us-east-2` | AWS region for S3 |
+| `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed origins |
+
+To deploy on a fresh EC2 instance:
+
+```bash
+# Clone and start
+git clone <repo-url> && cd movie-rec-engine
+docker-compose up -d --build
+
+# Verify
+curl http://localhost:8000/health
+```
+
+### Frontend (Vercel)
+
+The React frontend is deployed on Vercel. A rewrite rule in `vercel.json` proxies all `/api/*` requests to the EC2 backend, solving the HTTPS/HTTP mixed-content problem without needing TLS on EC2.
+
+The `VITE_API_URL` environment variable is set to `/api` in Vercel's project settings. In local development, it defaults to empty string (requests go to `http://localhost:8000` via Vite's dev server or directly).
+
+To redeploy:
+
+```bash
+cd movie-rec-engine
+vercel --prod
+```
+
+---
+
+## Getting Started (Local Development)
 
 ### Prerequisites
 - Python 3.10+
@@ -178,15 +356,8 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Extract the dataset:
-```bash
-cd ..
-unzip ml-latest-small.zip -d backend/data/raw/
-```
-
 Train the model (takes about 30 seconds):
 ```bash
-cd backend
 python -m app.services.trainer
 ```
 
@@ -204,6 +375,14 @@ npm run dev
 ```
 
 Open http://localhost:5173 in your browser.
+
+### Docker (Alternative)
+
+```bash
+docker compose up --build
+```
+
+Backend will be available at http://localhost:8000.
 
 ---
 

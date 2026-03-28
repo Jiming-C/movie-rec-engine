@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 
-const API = 'http://localhost:8000'
+const API = import.meta.env.VITE_API_URL || ''
 
 export default function EmbeddingMap() {
   const [data, setData] = useState(null)
@@ -95,7 +95,7 @@ export default function EmbeddingMap() {
 
       {/* Chart */}
       <div style={{ background: '#fff', border: '2px inset #d4d0c8' }}>
-        <svg width={W} height={H} style={{ display: 'block' }}>
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }}>
           {/* Grid */}
           {[0.25, 0.5, 0.75].map((f) => (
             <g key={f}>
